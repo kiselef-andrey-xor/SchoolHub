@@ -1,0 +1,66 @@
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Заголовки безопасности вынесены в /etc/nginx/snippets/security-headers.conf
+    # и подключаются в каждом location, где есть свой add_header: nginx наследует
+    # add_header с верхнего уровня ТОЛЬКО если на текущем уровне их нет вовсе,
+    # поэтому раньше статика (весь JS-бандл) уходила без nosniff и CSP
+    # (review/REVIEW.md §5.13). TLS терминируется на DSM Reverse Proxy / внешнем nginx.
+
+    gzip on;
+    gzip_comp_level 5;
+    gzip_min_length 1024;
+    gzip_types text/css application/javascript application/json image/svg+xml;
+
+    # SPA: любой маршрут отдаём в index.html
+    location / {
+        include /etc/nginx/snippets/security-headers.conf;
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Reverse-proxy на backend (адрес подставляется из ENV контейнера: BACKEND_HOST/BACKEND_PORT)
+    location /api/ {
+        proxy_pass http://${BACKEND_HOST}:${BACKEND_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        client_max_body_size ${MAX_UPLOAD_SIZE};   # загрузка PDF/DOCX приказов
+        proxy_request_buffering off;               # не буферизуем большие файлы на диске
+        proxy_read_timeout 180s;
+        proxy_send_timeout 180s;
+    }
+
+    # WebSocket-шлюз уведомлений: долгое соединение с ping/pong каждые 30 секунд
+    location /api/v1/realtime/ {
+        proxy_pass http://${BACKEND_HOST}:${BACKEND_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # статика с долгим кэшем (имена файлов содержат хеш сборки)
+    location ~* \.(js|css|png|jpg|jpeg|svg|woff2?)$ {
+        include /etc/nginx/snippets/security-headers.conf;
+        expires 7d;
+        add_header Cache-Control "public, max-age=604800, immutable";
+    }
+
+    location = /healthz {
+        include /etc/nginx/snippets/security-headers.conf;
+        access_log off;
+        return 200 "ok\n";
+        add_header Content-Type text/plain;
+    }
+}
