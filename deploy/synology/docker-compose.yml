@@ -1,0 +1,171 @@
+# ЗЕРКАЛЬНАЯ КОПИЯ корневого docker-compose.yml — НЕ редактируйте этот файл.
+# Правки вносите в корневой docker-compose.yml, затем выполните:  make sync-compose
+# (цель просто копирует корневой файл сюда, поэтому расхождение невозможно).
+# В мастере Container Manager можно выбирать любой из двух файлов — они идентичны.
+
+# ============================================================================
+#  SchoolHub — редакция от 28.10.2026 (без секретов в репозитории)
+#
+#  ВАЖНО, что изменилось по сравнению с редакцией 13.10.2026:
+#
+#    • SECRET_KEY больше НЕ захардкожен. Раньше в файле лежал открытый ключ
+#      подписи JWT — репозиторий публичный, значит любой мог подделать токен
+#      Владельца для любой установки, развёрнутой по этой инструкции. Теперь
+#      ключ генерируется при первом старте и сохраняется в том secrets_v2
+#      (/data/secrets/secret_key, права 0600), поэтому переживает пересоздание
+#      контейнера и сессии пользователей не сбрасываются.
+#      См. app/config.py::_resolve_secret_key и review/REVIEW.md §P0-3.
+#
+#    • Учётные данные Владельца больше НЕ захардкожены. Раньше `command:`
+#      создавал admin@schoolhub.local с публично известным паролем. Теперь
+#      работает штатный сценарий: при первом старте backend печатает в журнал
+#      ОДНОРАЗОВЫЙ код настройки, вы открываете сайт и создаёте Владельца сами.
+#
+#      Если нужен полностью автоматический старт без браузера — задайте в .env
+#      рядом с этим файлом:
+#          OWNER_EMAIL=директор@школа.рф
+#          OWNER_PASSWORD=<ваш пароль, минимум 8 символов>
+#          OWNER_NAME=Администратор
+#          SCHOOL_NAME=МБОУ СОШ №1
+#      Их читает app/services/bootstrap.py::ensure_owner_from_env.
+#      Переменные не заданы — сценарий с кодом настройки (рекомендуется).
+#
+#    • Пути сборки параметризованы: APP_ROOT задаёт корень проекта.
+#      По умолчанию — /volume2/docker/schoolhub/app (Synology). На обычной
+#      машине укажите в .env:  APP_ROOT=.
+#
+#  Запуск на NAS: Container Manager → Проект → Создать →
+#          путь /docker/schoolhub/app, файл docker-compose.yml (этот).
+#  Запуск на сервере:  docker compose up -d --build
+# ============================================================================
+
+name: schoolhub
+
+services:
+  db:
+    image: postgres:16-alpine                 # мультиарх: есть linux/arm64
+    container_name: schoolhub-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: schoolhub
+      POSTGRES_USER: schoolhub
+      # Порт наружу НЕ публикуется — БД доступна только внутри сети контейнеров.
+      # Значение по умолчанию допустимо именно поэтому; задайте своё в .env, если
+      # снимете isolation или включите публикацию порта.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-schoolhub}
+      TZ: ${TZ:-Europe/Moscow}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=128MB                  # экономим память NAS
+      - -c
+      - max_connections=40
+      - -c
+      - log_min_duration_statement=1000
+    volumes:
+      - db_v2:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U schoolhub -d schoolhub"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 420M
+    networks: [schoolhub]
+
+  backend:
+    build:
+      context: ${APP_ROOT:-/volume2/docker/schoolhub/app}/backend
+    image: schoolhub-backend:local
+    container_name: schoolhub-backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      APP_ENV: prod
+      DATABASE_URL: postgresql+asyncpg://schoolhub:${POSTGRES_PASSWORD:-schoolhub}@db:5432/schoolhub
+      # SECRET_KEY намеренно НЕ задан: генерируется и persists в SECRET_KEY_FILE.
+      # Задать свой можно через .env (SECRET_KEY=...) — нужен при нескольких
+      # репликах backend'а, чтобы они принимали одни и те же токены.
+      SECRET_KEY: ${SECRET_KEY:-}
+      SECRET_KEY_FILE: /data/secrets/secret_key
+      ACCESS_TOKEN_TTL_MIN: ${ACCESS_TOKEN_TTL_MIN:-30}
+      REFRESH_TOKEN_TTL_DAYS: ${REFRESH_TOKEN_TTL_DAYS:-14}
+      # auto = Secure-cookie при входе по HTTPS (DSM-прокси пробрасывает X-Forwarded-Proto)
+      COOKIE_SECURE: ${COOKIE_SECURE:-auto}
+      # Origin'ы, которым разрешён CORS (JSON-список или перечисление через запятую).
+      # Нужен, только если фронтенд открывается с другого origin, чем API; например,
+      # за HTTPS-реверс-прокси:  CORS_ORIGINS=["https://atom-school.local:9090"]
+      CORS_ORIGINS: '${CORS_ORIGINS:-["http://localhost:5173", "http://localhost:4173"]}'
+      AUTO_MIGRATE: ${AUTO_MIGRATE:-true}
+      UPLOAD_DIR: /data/uploads
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-25}
+      TRUST_PROXY_HEADERS: "true"
+      TZ: ${TZ:-Europe/Moscow}
+      LDAP_ENABLED: ${LDAP_ENABLED:-false}   # домен (Active Directory) выключен
+      AUTO_SEED: ${AUTO_SEED:-false}         # демо-данные не нужны
+      # Необязательный автоматический первый Владелец (см. шапку файла).
+      # Пусто — система стартует в режиме «первоначальная настройка» и печатает
+      # одноразовый код в журнал контейнера.
+      OWNER_EMAIL: ${OWNER_EMAIL:-}
+      OWNER_PASSWORD: ${OWNER_PASSWORD:-}
+      OWNER_NAME: ${OWNER_NAME:-}
+      SCHOOL_NAME: ${SCHOOL_NAME:-}
+    volumes:
+      - uploads_v2:/data/uploads
+      - secrets_v2:/data/secrets
+    expose:
+      - "8000"                                # внутри сети контейнеров, наружу не виден
+    # --workers 1 ОБЯЗАТЕЛЕН: in-memory состояния (login_limiter, realtime.hub,
+    # кэш флага локдауна) не разделяются между воркерами. См. docs/DEPLOY-NAS.md.
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000",
+              "--workers", "1", "--proxy-headers"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health',timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    deploy:
+      resources:
+        limits:
+          memory: 460M
+    networks: [schoolhub]
+
+  frontend:
+    build:
+      context: ${APP_ROOT:-/volume2/docker/schoolhub/app}/frontend
+      target: prod                            # nginx + готовая статика
+      args:
+        VITE_API_URL: /api/v1
+    image: schoolhub-frontend:local
+    container_name: schoolhub-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      BACKEND_HOST: backend
+      BACKEND_PORT: "8000"
+      MAX_UPLOAD_SIZE: ${MAX_UPLOAD_SIZE:-30m}
+      TZ: ${TZ:-Europe/Moscow}
+    ports:
+      - "${HTTP_PORT:-8080}:80"               # ← единственный порт, который видно в сети
+    deploy:
+      resources:
+        limits:
+          memory: 96M
+    networks: [schoolhub]
+
+networks:
+  schoolhub:
+    driver: bridge
+
+volumes:
+  db_v2:
+  uploads_v2:
+  secrets_v2:

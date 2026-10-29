@@ -1,0 +1,46 @@
+# ============================================================
+#  SchoolHub backend — зависимости (версии проверены на Python 3.11/3.12)
+# ============================================================
+
+# --- web ---
+fastapi==0.143.0
+uvicorn[standard]==0.38.0
+python-multipart==0.0.32
+
+# --- validation / settings ---
+pydantic==2.14.1
+pydantic-settings==2.15.0
+email-validator==2.3.0
+
+# --- db ---
+SQLAlchemy[asyncio]==2.1.4
+asyncpg==0.31.0            # драйвер PostgreSQL
+aiosqlite==0.22.1          # только для тестов (in-memory SQLite)
+
+# --- security ---
+PyJWT==2.15.1
+passlib==1.7.4
+bcrypt==4.0.1              # pinned: passlib 1.7.4 несовместим с bcrypt>=4.1
+ldap3==2.9.1               # Active Directory / LDAP (чистый Python — собирается на arm64 без компиляторов)
+
+# --- misc ---
+python-dateutil==2.9.0.post0
+alembic==1.20.0            # миграции схемы (автоприменение при старте, AUTO_MIGRATE)
+
+# --- документы: генерация демо-PDF/DOCX и (опц.) конвертация для превью ---
+reportlab==5.0.1
+python-docx==1.2.0
+Pillow==13.0.0           # v1.12: упаковка фото/сканов в PDF-копию документа
+                         # (app/services/document_pdf.py). ReportLab тянет её и сам,
+                         # но закрепляем явно: без Pillow WEBP/JPEG не конвертируются.
+
+# --- dev / tests ---
+pytest==9.1.1
+pytest-asyncio==1.4.0
+httpx==0.28.1
+
+# --- runtime-зависимость SQLAlchemy async ---
+greenlet==3.5.6
+pyotp==2.9.0           # TOTP (RFC 6238) — электронная подпись сотрудника
+cryptography==50.0.2   # Fernet: шифрование totp_secret_enc (app/services/totp.py) — ОБЯЗАТЕЛЬНО,
+                       # без него не импортируется app.main (цепочка api → services.help → services.totp)
